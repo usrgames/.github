@@ -6,7 +6,7 @@ Every usr.games program is released the same way, by one workflow: `.github/work
 
 | Job | What |
 |---|---|
-| build | Runs the repository's `make check`. Builds an archive for macOS and for Linux, on arm64 and amd64, each holding the program, its `LICENSE`, and its `NOTICES` if there is one. Where asked, builds the program for a web page and renders the manual page to HTML. Writes `manifest.json`. |
+| build | Runs the repository's `make check`. Builds an archive for macOS and for Linux, on arm64 and amd64, each holding the program, its `LICENSE`, its `NOTICES` if there is one, and its manual page if one is named. Where asked, builds the program for a web page and renders the manual page to HTML. Writes `manifest.json`. |
 | sign | Waits in the repository's `release` environment for a person to approve. Then signs the manifest with the release key, naming its certificate, and checks its own signature. |
 | try | On Linux amd64, Linux arm64 and macOS, does what a player's machine does: checks the signature, checks every file against the manifest, unpacks the archive, and runs the program with `--version`. |
 | publish | Only once every try has passed. A tag with a hyphen, such as `v1.0.0-rc.1`, is published as a pre-release. |
@@ -17,9 +17,9 @@ The keys, and how to check a release by hand, are in [KEYS.md](https://github.co
 
 | File | What |
 |---|---|
-| `NAME_OS_ARCH.tar.gz` | The program for one system: `darwin` or `linux`, `arm64` or `amd64`. |
+| `NAME_OS_ARCH.tar.gz` | The program for one system: `darwin` or `linux`, `arm64` or `amd64`. With it, its `LICENSE` and, where one is named, its manual page as it was written, which `tty1 man` opens. |
 | `NAME.wasm.gz`, `wasm_exec.js` | The program for a web page, and the glue from the Go that built it. Only where asked. |
-| `NAME.6.html` | The manual page. Only where asked. |
+| `NAME.6.html` | The manual page as HTML, for the site. Only where asked. |
 | `manifest.json` | Every file above, with its size and SHA-256. |
 | `manifest.json.sig` | The signature of the manifest. |
 
@@ -101,7 +101,7 @@ The inputs:
 | `dir` | The folder of the Go module, when it is not the repository's root. | `.` |
 | `go-version` | The Go to build with. | `1.27` |
 | `page` | Also build for a web page. | `false` |
-| `man` | A manual page to ship as HTML too. | none |
+| `man` | A manual page: it goes in each archive, and is shipped as HTML too. | none |
 | `rehearsal` | Sign with keys made for the run, and publish nothing. | `false` |
 | `again` | Build nothing: sign this tag's release again. | `false` |
 
