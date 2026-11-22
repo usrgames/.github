@@ -86,6 +86,14 @@ jobs:
       - name: the tool that turns a manual page into HTML
         if: ${{ inputs.man != '' }}
         run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends mandoc
+      - name: the checkout is still as the tag left it
+        run: |
+          left="$(git status --porcelain)"
+          if [ -n "$left" ]; then
+            echo "make check left these behind, and Go would stamp the release as built from changed sources:" >&2
+            echo "$left" >&2
+            exit 1
+          fi
       - name: build
         env:
           PKG: ${{ inputs.package }}
@@ -123,6 +131,7 @@ jobs:
             if [ -n "$MAN" ]; then mandoc -T html "$MAN" > "$out/$(basename "$MAN").html"; fi
             # The manifest: every file in name order, with its size and hash. An archive also
             # says what it runs on. It holds no date, so the same build writes the same manifest.
+            # It is written beside the folder and moved in, or it would list itself, half made.
             ( cd "$out"
               for f in $(ls | LC_ALL=C sort); do
                 size=$(wc -c < "$f" | tr -d ' '); sum=$(sha256sum "$f" | cut -d' ' -f1)
@@ -130,19 +139,26 @@ jobs:
                 case "$f" in "${NAME}"_*_*.tar.gz) rest=${f#"${NAME}"_}; rest=${rest%.tar.gz}; os=${rest%_*}; arch=${rest#*_} ;; esac
                 jq -n --arg name "$f" --argjson size "$size" --arg sha256 "$sum" --arg os "$os" --arg arch "$arch" \
                   '{name: $name, size: $size, sha256: $sha256} + (if $os != "" then {os: $os, arch: $arch} else {} end)'
-              done | jq -s --arg name "$NAME" --arg version "$VERSION" '{schema: 1, name: $name, version: $version, files: .}' > manifest.json )
+              done | jq -s --arg name "$NAME" --arg version "$VERSION" '{schema: 1, name: $name, version: $version, files: .}' ) > "$out.manifest"
+            mv "$out.manifest" "$out/manifest.json"
           }
-          build_into dist
-          cat dist/manifest.json
+          # Nothing is written inside the checkout. A file left there makes Go stamp every later
+          # build as made from changed sources, so the first archive would differ from the rest.
+          build_into "$RUNNER_TEMP/release"
+          cat "$RUNNER_TEMP/release/manifest.json"
+          if jq -e 'any(.files[]; .name == "manifest.json" or .size == 0)' "$RUNNER_TEMP/release/manifest.json" > /dev/null; then
+            echo "the manifest lists itself, or an empty file" >&2
+            exit 1
+          fi
           if [ "$REHEARSAL" = true ]; then
             build_into "$RUNNER_TEMP/twice"
-            cmp dist/manifest.json "$RUNNER_TEMP/twice/manifest.json" || { echo "built twice, the release differs" >&2; exit 1; }
+            cmp "$RUNNER_TEMP/release/manifest.json" "$RUNNER_TEMP/twice/manifest.json" || { echo "built twice, the release differs" >&2; exit 1; }
             echo "built twice, the release is the same"
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release
-          path: ${{ inputs.dir }}/dist/
+          path: ${{ runner.temp }}/release/
           if-no-files-found: error
 
   # To sign a release again: take it as it was published. Its old signature must have been good

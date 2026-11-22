@@ -87,7 +87,7 @@ jobs:
 
 And the repository needs:
 
-- **`make check`**, which the build runs first.
+- **`make check`**, which the build runs first. It must leave nothing behind in the checkout: Go records in a program whether it was built from changed sources, and the build stops if it would be.
 - **A `version`.** The program's main package declares `var version = "dev"`, and `NAME --version` prints it. The build sets it to the tag.
 - **A `LICENSE`** at the root of the module, and a `NOTICES` if it ships other people's code.
 - **A `release` environment** that lets only a tag `v*` in, asks for a reviewer, and holds the release key as the secret `RELEASE_KEY`.
