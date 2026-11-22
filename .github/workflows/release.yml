@@ -29,7 +29,7 @@ on:
         type: boolean
         default: false
       man:
-        description: "A manual page to ship as HTML too, such as man/rustwake.6. Empty for none."
+        description: "A manual page, such as man/rustwake.6: it goes in each archive, and is shipped as HTML too. Empty for none."
         type: string
         default: ""
       rehearsal:
@@ -114,6 +114,10 @@ jobs:
               GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$stage/$NAME" "$PKG"
               cp LICENSE "$stage/"
               if [ -f NOTICES ]; then cp NOTICES "$stage/"; fi
+              # The manual page as it was written, for the launcher's `man` to open after an install.
+              if [ -n "$MAN" ]; then cp "$MAN" "$stage/"; fi
+              # mktemp makes a folder only its owner may enter, and tar would write that down.
+              chmod 755 "$stage"
               pack "$stage" "$out/${NAME}_${os}_${arch}.tar.gz"
             done
             if [ "$PAGE" = true ]; then
@@ -295,6 +299,8 @@ jobs:
           name: signed
           path: signed
       - name: try the release as a player would
+        env:
+          MAN: ${{ inputs.man }}
         run: |
           set -u
           mv signed/manifest.json.sig dist/
@@ -338,6 +344,12 @@ jobs:
           if [ -z "$archive" ]; then echo "the manifest names no archive for $os/$arch" >&2; exit 1; fi
           mkdir unpacked && tar -C unpacked -xzf "dist/$archive"
           if [ ! -f unpacked/LICENSE ]; then echo "$archive holds no LICENSE" >&2; exit 1; fi
+          if [ -n "$MAN" ] && [ ! -s "unpacked/$(basename "$MAN")" ]; then echo "$archive holds no $(basename "$MAN")" >&2; exit 1; fi
+          # The archive's own folder comes first in it, and anyone may read a folder unpacked from it.
+          case "$(tar -tvzf "dist/$archive" | head -1)" in
+            drwxr-xr-x*) ;;
+            *) echo "$archive's own folder is not open to read: $(tar -tvzf "dist/$archive" | head -1)" >&2; exit 1 ;;
+          esac
           said=$("unpacked/$NAME" --version)
           case "$said" in
             *"$VERSION"*) echo "$archive runs on $os/$arch and says: $said" ;;
