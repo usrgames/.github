@@ -1,0 +1,363 @@
+name: release
+
+# The one way a usr.games program is released. A repository calls this on a tag v*; RELEASES.md
+# says how. It builds the release and lists its files in a manifest, signs the manifest with the
+# release key once a person has approved, tries the result on three kinds of machine the way a
+# player would, and only then publishes it.
+#
+# Every step is written in this file, so the commit a caller pins is the whole of what runs.
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: "The program's name: its file inside each archive, and the start of each archive's name."
+        type: string
+        required: true
+      package:
+        description: "The Go package that is the program."
+        type: string
+        default: "."
+      dir:
+        description: "The folder of the Go module, when it is not the repository's root."
+        type: string
+        default: "."
+      go-version:
+        type: string
+        default: "1.27"
+      page:
+        description: "Also build the program for a web page."
+        type: boolean
+        default: false
+      man:
+        description: "A manual page to ship as HTML too, such as man/rustwake.6. Empty for none."
+        type: string
+        default: ""
+      rehearsal:
+        description: "Sign with keys made for this run alone, and publish nothing."
+        type: boolean
+        default: false
+      again:
+        description: "Build nothing: sign this tag's release again, under the current certificate."
+        type: boolean
+        default: false
+    secrets:
+      RELEASE_KEY:
+        description: "The release key, from the calling repository's release environment."
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  # Never download a different Go than the one the job asked for.
+  GOTOOLCHAIN: local
+  # Who signs a release, and for what: the identity and the namespace of every signature.
+  WHO: release@usr.games
+  # Where the root's public key and the release key's certificate are published.
+  KEYS: https://raw.githubusercontent.com/usrgames/usr.games/main/site/etc
+  NAME: ${{ inputs.name }}
+  VERSION: ${{ inputs.rehearsal && 'v0.0.0-rehearsal' || github.ref_name }}
+
+jobs:
+  # The archives, the build for a page, the manual page, and the manifest that lists them all.
+  build:
+    if: ${{ !inputs.again }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ${{ inputs.dir }}
+    steps:
+      - name: only a tag v* is released
+        if: ${{ !inputs.rehearsal && !startsWith(github.ref, 'refs/tags/v') }}
+        working-directory: .
+        run: |
+          echo "this ran on $GITHUB_REF: a release is made from a tag v*, and anything else is a rehearsal" >&2
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ inputs.go-version }}
+          # A release is built from nothing but the tag: no cache from an earlier run.
+          cache: false
+      - run: make check
+      - name: the tool that turns a manual page into HTML
+        if: ${{ inputs.man != '' }}
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends mandoc
+      - name: build
+        env:
+          PKG: ${{ inputs.package }}
+          PAGE: ${{ inputs.page }}
+          MAN: ${{ inputs.man }}
+          REHEARSAL: ${{ inputs.rehearsal }}
+        run: |
+          set -u
+          # The same files give the same archive, byte for byte: fixed order, dates and owner.
+          pack() {
+            tar --sort=name --mtime='1980-01-01 00:00:00Z' --owner=0 --group=0 --numeric-owner -C "$1" -cf - . | gzip -n -9 > "$2"
+          }
+          build_into() {
+            local out="$1" target os arch stage size f sum rest
+            mkdir -p "$out"
+            for target in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64; do
+              os=${target%/*}; arch=${target#*/}; stage="$(mktemp -d)"
+              GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$stage/$NAME" "$PKG"
+              cp LICENSE "$stage/"
+              if [ -f NOTICES ]; then cp NOTICES "$stage/"; fi
+              pack "$stage" "$out/${NAME}_${os}_${arch}.tar.gz"
+            done
+            if [ "$PAGE" = true ]; then
+              stage="$(mktemp -d)"
+              GOOS=js GOARCH=wasm go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$stage/$NAME.wasm" "$PKG"
+              gzip -n -9 -c "$stage/$NAME.wasm" > "$out/$NAME.wasm.gz"
+              # The glue must come from the Go that built the program, or the page cannot start it.
+              cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" "$out/"
+              size=$(wc -c < "$out/$NAME.wasm.gz" | tr -d ' ')
+              if [ "$size" -gt 20000000 ]; then
+                echo "the build for the page is $size bytes gzipped: over 20 MB" >&2
+                return 1
+              fi
+            fi
+            if [ -n "$MAN" ]; then mandoc -T html "$MAN" > "$out/$(basename "$MAN").html"; fi
+            # The manifest: every file in name order, with its size and hash. An archive also
+            # says what it runs on. It holds no date, so the same build writes the same manifest.
+            ( cd "$out"
+              for f in $(ls | LC_ALL=C sort); do
+                size=$(wc -c < "$f" | tr -d ' '); sum=$(sha256sum "$f" | cut -d' ' -f1)
+                os=""; arch=""
+                case "$f" in "${NAME}"_*_*.tar.gz) rest=${f#"${NAME}"_}; rest=${rest%.tar.gz}; os=${rest%_*}; arch=${rest#*_} ;; esac
+                jq -n --arg name "$f" --argjson size "$size" --arg sha256 "$sum" --arg os "$os" --arg arch "$arch" \
+                  '{name: $name, size: $size, sha256: $sha256} + (if $os != "" then {os: $os, arch: $arch} else {} end)'
+              done | jq -s --arg name "$NAME" --arg version "$VERSION" '{schema: 1, name: $name, version: $version, files: .}' > manifest.json )
+          }
+          build_into dist
+          cat dist/manifest.json
+          if [ "$REHEARSAL" = true ]; then
+            build_into "$RUNNER_TEMP/twice"
+            cmp dist/manifest.json "$RUNNER_TEMP/twice/manifest.json" || { echo "built twice, the release differs" >&2; exit 1; }
+            echo "built twice, the release is the same"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: ${{ inputs.dir }}/dist/
+          if-no-files-found: error
+
+  # To sign a release again: take it as it was published. Its old signature must have been good
+  # on the day it was published, and its manifest must name this program and this tag. Whether
+  # its files still match the manifest is checked by try, before any new signature is published.
+  fetch:
+    if: ${{ inputs.again }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: fetch the release as published
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" --dir dist
+          published=$(gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json publishedAt --jq .publishedAt)
+          when="$(date -u -d "$published" +%Y%m%d%H%M%S)Z"
+          curl -fsSL "$KEYS/allowed_signers" -o allowed_signers
+          ssh-keygen -Y verify -f allowed_signers -I "$WHO" -n "$WHO" -Overify-time="$when" -s dist/manifest.json.sig < dist/manifest.json
+          if [ "$(jq -r .name dist/manifest.json)" != "$NAME" ] || [ "$(jq -r .version dist/manifest.json)" != "$VERSION" ]; then
+            echo "the manifest is not that of $NAME $VERSION" >&2
+            exit 1
+          fi
+          rm dist/manifest.json.sig
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: dist/
+          if-no-files-found: error
+
+  # The one job that holds the release key. The release environment lets only a tag v* in, and
+  # waits for a person to approve.
+  sign:
+    if: ${{ !cancelled() && !inputs.rehearsal && (needs.build.result == 'success' || needs.fetch.result == 'success') }}
+    needs: [build, fetch]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+      - name: sign the manifest
+        env:
+          RELEASE_KEY: ${{ secrets.RELEASE_KEY }}
+        run: |
+          set -u
+          if [ -z "$RELEASE_KEY" ]; then echo "no RELEASE_KEY: the calling workflow must pass it, see RELEASES.md" >&2; exit 1; fi
+          umask 077
+          mkdir keys
+          printf '%s\n' "$RELEASE_KEY" > keys/release
+          curl -fsSL "$KEYS/release-cert.pub" -o keys/release-cert.pub
+          curl -fsSL "$KEYS/allowed_signers" -o allowed_signers
+          # The certificate is named, not the key: a signature made with the bare key is refused.
+          ssh-keygen -q -Y sign -f keys/release-cert.pub -n "$WHO" dist/manifest.json
+          rm -r keys
+          # Refuse to go on with a signature a player's machine would refuse.
+          ssh-keygen -Y verify -f allowed_signers -I "$WHO" -n "$WHO" -s dist/manifest.json.sig < dist/manifest.json
+          mkdir signed && mv dist/manifest.json.sig allowed_signers signed/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed
+          path: signed/
+          if-no-files-found: error
+
+  # A rehearsal signs with a root, a release key and a certificate made here, good for an hour and
+  # for nothing else. It then signs again under a second certificate, as a renewal does.
+  sign-rehearsal:
+    if: ${{ inputs.rehearsal }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+      - name: sign the manifest with keys made for this run
+        run: |
+          set -u
+          umask 077
+          mkdir keys
+          ssh-keygen -q -t ed25519 -N "" -C "rehearsal root" -f keys/root
+          ssh-keygen -q -t ed25519 -N "" -C "rehearsal release" -f keys/release
+          ssh-keygen -q -s keys/root -I "rehearsal" -n "$WHO" -V +1h -z 1 -O clear keys/release.pub
+          printf '%s cert-authority,namespaces="%s" %s\n' "$WHO" "$WHO" "$(cut -d' ' -f1,2 keys/root.pub)" > allowed_signers
+          verify() { ssh-keygen -Y verify -f allowed_signers -I "$WHO" -n "$WHO" "$@" -s dist/manifest.json.sig < dist/manifest.json; }
+          ssh-keygen -q -Y sign -f keys/release-cert.pub -n "$WHO" dist/manifest.json
+          verify
+          # As fetch does: the signature was good at a moment inside its certificate's hour.
+          verify -Overify-time="$(date -u +%Y%m%d%H%M%S)Z"
+          # As a renewal does: a new certificate for the same key, and the same manifest signed again.
+          first=$(sha256sum dist/manifest.json.sig | cut -d' ' -f1)
+          ssh-keygen -q -s keys/root -I "rehearsal renewed" -n "$WHO" -V +1h -z 2 -O clear keys/release.pub
+          rm dist/manifest.json.sig
+          ssh-keygen -q -Y sign -f keys/release-cert.pub -n "$WHO" dist/manifest.json
+          verify
+          if [ "$first" = "$(sha256sum dist/manifest.json.sig | cut -d' ' -f1)" ]; then echo "signed again, the signature did not change" >&2; exit 1; fi
+          # A signature made with the bare key must be refused, or the certificate means nothing.
+          cp dist/manifest.json bare.json
+          ssh-keygen -q -Y sign -f keys/release -n "$WHO" bare.json
+          if ssh-keygen -Y verify -f allowed_signers -I "$WHO" -n "$WHO" -s bare.json.sig < bare.json; then
+            echo "a signature with no certificate was accepted" >&2
+            exit 1
+          fi
+          rm -r keys
+          mkdir signed && mv dist/manifest.json.sig allowed_signers signed/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed
+          path: signed/
+          if-no-files-found: error
+
+  # What a player's machine does, on each kind of machine there is a runner for, before anyone
+  # can download the release: check the signature, check every file, unpack, run.
+  try:
+    if: ${{ !cancelled() && (needs.sign.result == 'success' || needs.sign-rehearsal.result == 'success') }}
+    needs: [sign, sign-rehearsal]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed
+          path: signed
+      - name: try the release as a player would
+        run: |
+          set -u
+          mv signed/manifest.json.sig dist/
+          check() { # $1 = a folder holding a release
+            local dir="$1" name size sum
+            ssh-keygen -Y verify -f signed/allowed_signers -I "$WHO" -n "$WHO" -s "$dir/manifest.json.sig" < "$dir/manifest.json" > /dev/null 2>&1 \
+              || { echo "the manifest's signature is refused" >&2; return 1; }
+            [ "$(jq -r .schema "$dir/manifest.json")" = 1 ] || { echo "a manifest of a kind this does not know" >&2; return 1; }
+            while IFS=$'\t' read -r name size sum; do
+              [ -f "$dir/$name" ] || { echo "$name is in the manifest and not in the release" >&2; return 1; }
+              [ "$(wc -c < "$dir/$name" | tr -d ' ')" = "$size" ] || { echo "$name is not the size the manifest says" >&2; return 1; }
+              [ "$(shasum -a 256 "$dir/$name" | cut -d' ' -f1)" = "$sum" ] || { echo "$name is not the file the manifest names" >&2; return 1; }
+            done < <(jq -r '.files[] | [.name, (.size | tostring), .sha256] | @tsv' "$dir/manifest.json")
+            # And nothing rides along that the manifest does not name.
+            for name in "$dir"/*; do
+              name=$(basename "$name")
+              case "$name" in manifest.json | manifest.json.sig) continue ;; esac
+              jq -e --arg n "$name" 'any(.files[]; .name == $n)' "$dir/manifest.json" > /dev/null || { echo "$name is in the release and not in the manifest" >&2; return 1; }
+            done
+          }
+          check dist
+          echo "the release checks out"
+
+          # The check has to be able to say no.
+          refused() { # what, then a folder that must be refused
+            if check "$2" 2> /dev/null; then echo "accepted: $1" >&2; exit 1; fi
+            echo "refused, as it must be: $1"
+          }
+          spoil() { mkdir "$1" && cp dist/* "$1"/; }
+          spoil bad1 && jq '.version = "v9.9.9"' dist/manifest.json > bad1/manifest.json
+          refused "a manifest changed after it was signed" bad1
+          first=$(jq -r '.files[0].name' dist/manifest.json)
+          spoil bad2 && printf 'x' >> "bad2/$first"
+          refused "a file with one byte added" bad2
+          spoil bad3 && mv "bad3/$first" bad3/renamed
+          refused "a file missing, and one the manifest does not name" bad3
+
+          case "$(uname -s)" in Darwin) os=darwin ;; Linux) os=linux ;; *) echo "no build for $(uname -s)" >&2; exit 1 ;; esac
+          case "$(uname -m)" in arm64 | aarch64) arch=arm64 ;; x86_64 | amd64) arch=amd64 ;; *) echo "no build for $(uname -m)" >&2; exit 1 ;; esac
+          archive=$(jq -r --arg os "$os" --arg arch "$arch" '.files[] | select(.os == $os and .arch == $arch) | .name' dist/manifest.json)
+          if [ -z "$archive" ]; then echo "the manifest names no archive for $os/$arch" >&2; exit 1; fi
+          mkdir unpacked && tar -C unpacked -xzf "dist/$archive"
+          if [ ! -f unpacked/LICENSE ]; then echo "$archive holds no LICENSE" >&2; exit 1; fi
+          said=$("unpacked/$NAME" --version)
+          case "$said" in
+            *"$VERSION"*) echo "$archive runs on $os/$arch and says: $said" ;;
+            *) echo "$archive says \"$said\", not $VERSION" >&2; exit 1 ;;
+          esac
+
+  # Only once every try has passed. A tag with a hyphen, such as v1.0.0-rc.1, is a pre-release.
+  publish:
+    if: ${{ !cancelled() && !inputs.rehearsal && needs.try.result == 'success' }}
+    needs: try
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed
+          path: signed
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AGAIN: ${{ inputs.again }}
+        run: |
+          set -u
+          mv signed/manifest.json.sig dist/
+          if [ "$AGAIN" = true ]; then
+            gh release upload "$VERSION" dist/manifest.json.sig --clobber --repo "$GITHUB_REPOSITORY"
+            exit 0
+          fi
+          notes='Every file here is named, with its SHA-256, in `manifest.json`, which is signed. To check it yourself, see [KEYS.md](https://github.com/usrgames/usr.games/blob/main/KEYS.md).'
+          pre=()
+          case "$VERSION" in *-*) pre=(--prerelease) ;; esac
+          gh release create "$VERSION" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$NAME $VERSION" --notes "$notes" --generate-notes "${pre[@]}"

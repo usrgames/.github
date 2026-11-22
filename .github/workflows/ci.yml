@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request makes the older run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The release workflow, whole, on the small program in testdata/hello: built, signed with keys
+  # made for the run, and tried on three kinds of machine. Nothing is published and the real key
+  # is never asked for. See RELEASES.md.
+  rehearse:
+    uses: ./.github/workflows/release.yml
+    # The workflow's last job publishes, so GitHub wants this granted even for a run that stops
+    # before it. Every other job there asks for no more than to read.
+    permissions:
+      contents: write
+    with:
+      name: hello
+      dir: testdata/hello
+      page: true
+      man: man/hello.6
+      rehearsal: true
+
+  # The one name the rule on main asks for. A job that is skipped counts as passed there, so this
+  # one always runs and says so itself if the rehearsal did not pass.
+  check:
+    if: ${{ always() }}
+    needs: rehearse
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: the rehearsal passed
+        env:
+          RESULT: ${{ needs.rehearse.result }}
+        run: |
+          echo "the rehearsal: $RESULT"
+          [ "$RESULT" = success ]
