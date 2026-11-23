@@ -32,6 +32,10 @@ on:
         description: "A manual page, such as man/rustwake.6: it goes in each archive, and is shipped as HTML too. Empty for none."
         type: string
         default: ""
+      media:
+        description: "A make target that writes the program's recording, NAME.gif and NAME.png, into the folder MEDIA names. Empty for none."
+        type: string
+        default: ""
       rehearsal:
         description: "Sign with keys made for this run alone, and publish nothing."
         type: boolean
@@ -59,7 +63,8 @@ env:
   VERSION: ${{ inputs.rehearsal && 'v0.0.0-rehearsal' || github.ref_name }}
 
 jobs:
-  # The archives, the build for a page, the manual page, and the manifest that lists them all.
+  # The archives, the build for a page, the manual page, the recording, and the manifest that
+  # lists them all.
   build:
     if: ${{ !inputs.again }}
     runs-on: ubuntu-latest
@@ -83,6 +88,41 @@ jobs:
           # A release is built from nothing but the tag: no cache from an earlier run.
           cache: false
       - run: make check
+      # Made before the checkout is checked, so a target that writes into it is caught there.
+      - name: the recording
+        if: ${{ inputs.media != '' }}
+        env:
+          MEDIA_TARGET: ${{ inputs.media }}
+          REHEARSAL: ${{ inputs.rehearsal }}
+        run: |
+          set -u
+          # What the site shows on the game's page: NAME.gif, playing over and over, and NAME.png,
+          # its still. Made outside the checkout, then held to what the site takes.
+          record() { # $1 = the folder to make it in
+            local dir="$1" got size
+            mkdir -p "$dir"
+            make "$MEDIA_TARGET" MEDIA="$dir"
+            got=$(cd "$dir" && ls -A | LC_ALL=C sort | tr '\n' ' ')
+            if [ "$got" != "$NAME.gif $NAME.png " ]; then
+              echo "make $MEDIA_TARGET must write $NAME.gif and $NAME.png and nothing else, and wrote: $got" >&2
+              return 1
+            fi
+            for f in "$dir/$NAME.gif" "$dir/$NAME.png"; do
+              if [ ! -f "$f" ] || [ -L "$f" ] || [ ! -s "$f" ]; then echo "$(basename "$f") is not a file with something in it" >&2; return 1; fi
+            done
+            if [ "$(head -c 6 "$dir/$NAME.gif")" != GIF89a ]; then echo "$NAME.gif is not a GIF" >&2; return 1; fi
+            if [ "$(head -c 8 "$dir/$NAME.png" | od -An -tx1 | tr -d ' \n')" != 89504e470d0a1a0a ]; then echo "$NAME.png is not a PNG" >&2; return 1; fi
+            # The site's front page loads one for each game.
+            size=$(wc -c < "$dir/$NAME.gif" | tr -d ' ')
+            if [ "$size" -gt 3000000 ]; then echo "$NAME.gif is $size bytes: over the 3,000,000 the site allows" >&2; return 1; fi
+            echo "the recording: $NAME.gif, $size bytes, and $NAME.png"
+          }
+          record "$RUNNER_TEMP/media"
+          if [ "$REHEARSAL" = true ]; then
+            record "$RUNNER_TEMP/media-twice"
+            diff -r "$RUNNER_TEMP/media" "$RUNNER_TEMP/media-twice" > /dev/null || { echo "made twice, the recording differs" >&2; exit 1; }
+            echo "made twice, the recording is the same"
+          fi
       - name: the tool that turns a manual page into HTML
         if: ${{ inputs.man != '' }}
         run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends mandoc
@@ -90,7 +130,7 @@ jobs:
         run: |
           left="$(git status --porcelain)"
           if [ -n "$left" ]; then
-            echo "make check left these behind, and Go would stamp the release as built from changed sources:" >&2
+            echo "make check, or the recording, left these behind, and Go would stamp the release as built from changed sources:" >&2
             echo "$left" >&2
             exit 1
           fi
@@ -99,6 +139,7 @@ jobs:
           PKG: ${{ inputs.package }}
           PAGE: ${{ inputs.page }}
           MAN: ${{ inputs.man }}
+          MEDIA_TARGET: ${{ inputs.media }}
           REHEARSAL: ${{ inputs.rehearsal }}
         run: |
           set -u
@@ -133,6 +174,7 @@ jobs:
               fi
             fi
             if [ -n "$MAN" ]; then mandoc -T html "$MAN" > "$out/$(basename "$MAN").html"; fi
+            if [ -n "$MEDIA_TARGET" ]; then cp "$RUNNER_TEMP/media/$NAME.gif" "$RUNNER_TEMP/media/$NAME.png" "$out/"; fi
             # The manifest: every file in name order, with its size and hash. An archive also
             # says what it runs on. It holds no date, so the same build writes the same manifest.
             # It is written beside the folder and moved in, or it would list itself, half made.

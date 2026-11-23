@@ -6,7 +6,7 @@ Every usr.games program is released the same way, by one workflow: `.github/work
 
 | Job | What |
 |---|---|
-| build | Runs the repository's `make check`. Builds an archive for macOS and for Linux, on arm64 and amd64, each holding the program, its `LICENSE`, its `NOTICES` if there is one, and its manual page if one is named. Where asked, builds the program for a web page and renders the manual page to HTML. Writes `manifest.json`. |
+| build | Runs the repository's `make check`, then, where asked, the make target that writes its recording. Builds an archive for macOS and for Linux, on arm64 and amd64, each holding the program, its `LICENSE`, its `NOTICES` if there is one, and its manual page if one is named. Where asked, builds the program for a web page and renders the manual page to HTML. Writes `manifest.json`. |
 | sign | Waits in the repository's `release` environment for a person to approve. Then signs the manifest with the release key, naming its certificate, and checks its own signature. |
 | try | On Linux amd64, Linux arm64 and macOS, does what a player's machine does: checks the signature, checks every file against the manifest, unpacks the archive, and runs the program with `--version`. |
 | publish | Only once every try has passed. A tag with a hyphen, such as `v1.0.0-rc.1`, is published as a pre-release. |
@@ -20,6 +20,7 @@ The keys, and how to check a release by hand, are in [KEYS.md](https://github.co
 | `NAME_OS_ARCH.tar.gz` | The program for one system: `darwin` or `linux`, `arm64` or `amd64`. With it, its `LICENSE` and, where one is named, its manual page as it was written, which `tty1 man` opens. |
 | `NAME.wasm.gz`, `wasm_exec.js` | The program for a web page, and the glue from the Go that built it. Only where asked. |
 | `NAME.6.html` | The manual page as HTML, for the site. Only where asked. |
+| `NAME.gif`, `NAME.png` | The recording the site shows on the game's page: a few seconds that play over and over, and its first frame as a still, for people who ask for less motion. Only where asked. |
 | `manifest.json` | Every file above, with its size and SHA-256. |
 | `manifest.json.sig` | The signature of the manifest. |
 
@@ -77,6 +78,7 @@ jobs:
       name: rustwake
       page: true
       man: man/rustwake.6
+      media: media
       rehearsal: ${{ inputs.rehearsal || false }}
       again: ${{ inputs.again || false }}
     secrets:
@@ -91,6 +93,7 @@ And the repository needs:
 - **A `version`.** The program's main package declares `var version = "dev"`, and `NAME --version` prints it. The build sets it to the tag.
 - **A `LICENSE`** at the root of the module, and a `NOTICES` if it ships other people's code.
 - **A `release` environment** that lets only a tag `v*` in, asks for a reviewer, and holds the release key as the secret `RELEASE_KEY`.
+- **For a recording, a make target** that writes `NAME.gif` and `NAME.png`, and nothing else, into the folder `MEDIA` names, such as `make media MEDIA=/some/folder`. The GIF plays over and over and is at most 3,000,000 bytes, since the site's front page loads one for each game. The PNG is its first frame. Made twice, they must be the same bytes, which a rehearsal checks, and the target must write nothing into the checkout.
 
 The inputs:
 
@@ -102,6 +105,7 @@ The inputs:
 | `go-version` | The Go to build with. | `1.27` |
 | `page` | Also build for a web page. | `false` |
 | `man` | A manual page: it goes in each archive, and is shipped as HTML too. | none |
+| `media` | A make target that writes the recording, `NAME.gif` and `NAME.png`, into the folder `MEDIA` names. | none |
 | `rehearsal` | Sign with keys made for the run, and publish nothing. | `false` |
 | `again` | Build nothing: sign this tag's release again. | `false` |
 
