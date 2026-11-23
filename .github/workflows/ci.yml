@@ -28,6 +28,7 @@ jobs:
       dir: testdata/hello
       page: true
       man: man/hello.6
+      media: media
       rehearsal: true
 
   # The one name the rule on main asks for. A job that is skipped counts as passed there, so this
