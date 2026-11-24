@@ -121,6 +121,107 @@ The inputs:
 | `rehearsal` | both | Sign with keys made for the run, and publish nothing. | `false` |
 | `again` | publish | Sign this tag's published release again. The caller skips build. | `false` |
 
+## A program whose source is private
+
+Its source stays in its private repository, and its releases are published from a public one beside it, named for its manual page: `usrgames/NAME.6`. A private repository on GitHub Free has no environment, so nothing there could ask a person before the release key signs, and tty1 and the site download a release without signing in.
+
+| Where | What happens |
+|---|---|
+| The private repository, on a tag `v*` | build, then hand-over: the unsigned release goes to the release repository as a draft, on a tag of the same name, and that repository's release workflow starts. |
+| The release repository | take holds the draft to its manifest, then sign waits for a person, then try, then publish, which publishes the bytes that were tried and deletes the draft. |
+
+The private repository's `.github/workflows/release.yml`:
+
+```yaml
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      rehearsal:
+        description: "Try the whole release with keys made for the run. Nothing is handed over."
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: usrgames/.github/.github/workflows/build.yml@COMMIT
+    with:
+      name: rustwake
+      page: true
+      man: man/rustwake.6
+      media: media
+      to: usrgames/rustwake.6
+      rehearsal: ${{ inputs.rehearsal || false }}
+    secrets:
+      HANDOVER_TOKEN: ${{ secrets.HANDOVER_TOKEN }}
+
+  # Only a rehearsal signs and tries here, with keys made for the run. It costs this repository's
+  # minutes, and a macOS minute counts as ten.
+  rehearse:
+    if: ${{ inputs.rehearsal }}
+    needs: build
+    uses: usrgames/.github/.github/workflows/publish.yml@COMMIT
+    permissions:
+      contents: write
+    with:
+      name: rustwake
+      man: man/rustwake.6
+      rehearsal: true
+```
+
+The release repository's `.github/workflows/release.yml`. The hand-over starts it by that name:
+
+```yaml
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      again:
+        description: "Run on a tag: sign that release again, under the current certificate."
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    uses: usrgames/.github/.github/workflows/publish.yml@COMMIT
+    permissions:
+      contents: write
+    with:
+      name: rustwake
+      man: man/rustwake.6
+      draft: ${{ !inputs.again }}
+      again: ${{ inputs.again }}
+    secrets:
+      RELEASE_KEY: ${{ secrets.RELEASE_KEY }}
+```
+
+The private repository needs what any repository does, above, except the `release` environment and the key. It also needs:
+
+- **The secret `HANDOVER_TOKEN`:** a fine-grained token whose owner is `usrgames`, for the release repositories only, that may read and write their contents and their actions. It ends with the release key's certificate and is made again at each renewal, as `KEYS.md` says.
+
+The release repository needs:
+
+- **To be public, and to hold none of the source:** its `README.md`, a `LICENSE` that says what a player may do with the program, its `NOTICES`, and the workflow above.
+- **A rule on `main` and on tags `v*`.** The owner of the hand-over token makes the tags, so may bypass it.
+- **A `release` environment** that lets only a tag `v*` in, asks for a reviewer, and holds the release key as the secret `RELEASE_KEY`.
+- **Issues on**, for players.
+
+To hand a version over again, after a take or a try that failed or a release that was not approved: delete its draft release and its tag in the release repository, which is safe since nothing is signed yet, then run the release again in the private repository. A run in the release repository that failed after take can be re-run there as it is.
+
+### What a closed program still shows
+
+Its source stays private, but a program is not a secret. Anyone with a release can read in it the names of its functions, types and packages, the modules it is built from and their versions, the commit and the time it was built from (`go version -m`), and every string in it. The build for a web page is a download like the others. The builds leave out the paths of the machine that made them and the tables a debugger reads (`-trimpath`, `-s -w`).
+
 ## Rehearse
 
 A rehearsal runs everything but the real key and the publishing. It makes a root, a release key and a certificate inside the run, good for an hour, signs with those, and tries the result on all three systems. It also builds the release twice and fails if the two differ.
@@ -133,6 +234,6 @@ A rehearsal runs everything but the real key and the publishing. It makes a root
 A signature carries the release key's certificate, and the certificate ends after a year. On that day a release stops checking out, though nothing in it changed. So at each renewal, a program's latest release is signed again:
 
 1. Renew the certificate, as `KEYS.md` says, and merge it into the site's repository.
-2. In each repository, run the release workflow by hand **on the release's tag**, with `again` ticked, and approve it.
+2. In each repository, run the release workflow by hand **on the release's tag**, with `again` ticked, and approve it. For a program whose source is private, that is its release repository's workflow.
 
 The run takes the release as published. Its old signature must have been good on the day it was published, and its manifest must name this program and this tag. It then signs the same manifest under the new certificate, tries the release on all three systems, and only then replaces the signature. A program released since the renewal needs none of this.
