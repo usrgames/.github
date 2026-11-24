@@ -1,6 +1,6 @@
 # Releases
 
-Every usr.games program is released the same way, by one workflow in two halves in this repository: `.github/workflows/build.yml` builds the release, and `.github/workflows/publish.yml` signs and publishes it. A repository calls both when a tag `v*` is pushed. This page says what it does, what a repository adds to use it, what a release holds, and how to rehearse.
+Every usr.games program is released the same way, by one workflow in two halves in this repository: `.github/workflows/build.yml` builds the release, and `.github/workflows/publish.yml` signs and publishes it. A repository calls both when a tag `v*` is pushed. This page says what it does, what a repository adds to use it, what a release holds, how to rehearse, and how a run is rerun when GitHub found no runner for one of its jobs.
 
 ## What happens on a tag
 
@@ -237,3 +237,34 @@ A signature carries the release key's certificate, and the certificate ends afte
 2. In each repository, run the release workflow by hand **on the release's tag**, with `again` ticked, and approve it. For a program whose source is private, that is its release repository's workflow.
 
 The run takes the release as published. Its old signature must have been good on the day it was published, and its manifest must name this program and this tag. It then signs the same manifest under the new certificate, tries the release on all three systems, and only then replaces the signature. A program released since the renewal needs none of this.
+
+## Rerun a job GitHub found no runner for
+
+A job sometimes waits 15 minutes in the queue and is cancelled with no steps, saying "The job was not acquired by Runner of type hosted even after multiple attempts". It is GitHub's macOS runners, short of capacity, and a rerun of the run's failed jobs passes. `.github/workflows/retry.yml` makes that rerun. It reruns a run that ended `failure` when one of its jobs was cancelled that way, the run is the newest of its workflow on its branch, and it has not been rerun twice. Anything else it leaves alone, and either way it says why in the run's summary.
+
+A repository that runs a job on macOS adds `.github/workflows/rerun.yml`, naming each workflow it watches, such as `ci` or `release`:
+
+```yaml
+name: rerun
+
+on:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+
+permissions:
+  actions: write
+  checks: read
+
+jobs:
+  retry:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    uses: usrgames/.github/.github/workflows/retry.yml@COMMIT
+```
+
+`actions: write` lets it rerun, and `checks: read` lets it read why a job was cancelled. A release repository adds it when it is made.
+
+- **A rerun of a release does not ask for approval again:** the sign job has passed by the time the macOS try runs, so only the try and the publish run again.
+- **A real failure in the same run is rerun with it.** That is accepted: if it is real, it fails again.
+- **The newest-run rule** is there because every CI here cancels an older run on its branch, so rerunning a run that a newer push has passed would cancel the newer one.
+- **A workflow on `workflow_run` runs from the default branch,** so `rerun.yml` takes effect once it is merged, not in its pull request.
