@@ -2,7 +2,9 @@ name: build
 
 # The first half of releasing a usr.games program, called on a tag v*. It runs the repository's
 # checks, builds the release and lists its files in a manifest, unsigned, as the run's artifact
-# release. publish.yml, the second half, signs it and publishes it. RELEASES.md says how to call both.
+# release. publish.yml, the second half, signs it and publishes it: in the same run, or, for a
+# program whose source is private, in the public release repository it is handed over to.
+# RELEASES.md says how to call both.
 #
 # Every step is written in these two files, so the commit a caller pins is the whole of what runs.
 on:
@@ -36,9 +38,17 @@ on:
         type: string
         default: ""
       rehearsal:
-        description: "Version the release v0.0.0-rehearsal, and build it twice to check the two are the same."
+        description: "Version the release v0.0.0-rehearsal, build it twice to check the two are the same, and hand nothing over."
         type: boolean
         default: false
+      to:
+        description: "For a program whose source is private: the public release repository, such as usrgames/rustwake.6, that the release is handed over to, to be signed and published there. Empty: the release stays in this run."
+        type: string
+        default: ""
+    secrets:
+      HANDOVER_TOKEN:
+        description: "With to: a token that may write the release repository's contents and start its workflows."
+        required: false
 
 permissions:
   contents: read
@@ -192,3 +202,36 @@ jobs:
           name: release
           path: ${{ runner.temp }}/release/
           if-no-files-found: error
+
+  # A program whose source is private is published from a public repository beside it, where a
+  # person approves before the release key signs: a private repository here has no environment
+  # to ask one. This hands the unsigned release over as a draft, on a tag of the same name, and
+  # starts that repository's release workflow. The one job that holds the token.
+  hand-over:
+    if: ${{ inputs.to != '' && !inputs.rehearsal }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+      - name: hand the release over
+        env:
+          GH_TOKEN: ${{ secrets.HANDOVER_TOKEN }}
+          TO: ${{ inputs.to }}
+        run: |
+          set -u
+          if [ -z "$GH_TOKEN" ]; then echo "no HANDOVER_TOKEN: a caller that names to must pass it, see RELEASES.md" >&2; exit 1; fi
+          # A version is handed over once. Its draft and its tag there can be deleted, since nothing is signed yet.
+          if gh api "repos/$TO/git/ref/tags/$VERSION" > /dev/null 2>&1; then
+            echo "$TO already has a tag $VERSION: to hand it over again, delete its draft release and the tag there" >&2
+            exit 1
+          fi
+          main=$(gh api "repos/$TO/commits/main" --jq .sha)
+          gh api -X POST "repos/$TO/git/refs" -f ref="refs/tags/$VERSION" -f sha="$main" > /dev/null
+          gh release create "$VERSION" dist/* --repo "$TO" --draft --verify-tag --title "$NAME $VERSION" \
+            --notes "Handed over by $GITHUB_REPOSITORY, run $GITHUB_RUN_ID, and not signed yet."
+          gh workflow run release.yml --repo "$TO" --ref "$VERSION"
+          echo "handed over: approve it in $TO's release run, https://github.com/$TO/actions"
