@@ -11,7 +11,7 @@ What every usr.games repository shares.
 
 The picture at the top of the profile page is `site/card.png` of [usr.games](https://github.com/usrgames/usr.games), loaded from its `main` branch. A test draws it there, so it is not copied here.
 
-When a repository joins the organization, or changes what it holds, its row on the profile page changes too.
+The profile page's table lists only what a visitor can open: a private repository has no row, and a game's release repository gets one when it is made. When a public repository joins the organization, or changes what it holds, its row changes too.
 
 ## License
 
