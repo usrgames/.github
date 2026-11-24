@@ -1,11 +1,11 @@
-name: release
+name: publish
 
-# The one way a usr.games program is released. A repository calls this on a tag v*; RELEASES.md
-# says how. It builds the release and lists its files in a manifest, signs the manifest with the
-# release key once a person has approved, tries the result on three kinds of machine the way a
-# player would, and only then publishes it.
+# The second half of releasing a usr.games program. It takes the release build.yml made in the
+# same run, signs its manifest with the release key once a person has approved, tries the result
+# on three kinds of machine the way a player would, and only then publishes it. With again, it
+# signs a published release again instead. RELEASES.md says how to call both halves.
 #
-# Every step is written in this file, so the commit a caller pins is the whole of what runs.
+# Every step is written in these two files, so the commit a caller pins is the whole of what runs.
 on:
   workflow_call:
     inputs:
@@ -13,27 +13,8 @@ on:
         description: "The program's name: its file inside each archive, and the start of each archive's name."
         type: string
         required: true
-      package:
-        description: "The Go package that is the program."
-        type: string
-        default: "."
-      dir:
-        description: "The folder of the Go module, when it is not the repository's root."
-        type: string
-        default: "."
-      go-version:
-        type: string
-        default: "1.27"
-      page:
-        description: "Also build the program for a web page."
-        type: boolean
-        default: false
       man:
-        description: "A manual page, such as man/rustwake.6: it goes in each archive, and is shipped as HTML too. Empty for none."
-        type: string
-        default: ""
-      media:
-        description: "A make target that writes the program's recording, NAME.gif and NAME.png, into the folder MEDIA names. Empty for none."
+        description: "The manual page each archive holds, such as man/rustwake.6, which try checks for. Empty for none."
         type: string
         default: ""
       rehearsal:
@@ -41,7 +22,7 @@ on:
         type: boolean
         default: false
       again:
-        description: "Build nothing: sign this tag's release again, under the current certificate."
+        description: "Sign this tag's published release again, under the current certificate."
         type: boolean
         default: false
     secrets:
@@ -53,8 +34,6 @@ permissions:
   contents: read
 
 env:
-  # Never download a different Go than the one the job asked for.
-  GOTOOLCHAIN: local
   # Who signs a release, and for what: the identity and the namespace of every signature.
   WHO: release@usr.games
   # Where the root's public key and the release key's certificate are published.
@@ -63,150 +42,6 @@ env:
   VERSION: ${{ inputs.rehearsal && 'v0.0.0-rehearsal' || github.ref_name }}
 
 jobs:
-  # The archives, the build for a page, the manual page, the recording, and the manifest that
-  # lists them all.
-  build:
-    if: ${{ !inputs.again }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: ${{ inputs.dir }}
-    steps:
-      - name: only a tag v* is released
-        if: ${{ !inputs.rehearsal && !startsWith(github.ref, 'refs/tags/v') }}
-        working-directory: .
-        run: |
-          echo "this ran on $GITHUB_REF: a release is made from a tag v*, and anything else is a rehearsal" >&2
-          exit 1
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: ${{ inputs.go-version }}
-          # A release is built from nothing but the tag: no cache from an earlier run.
-          cache: false
-      - run: make check
-      # Made before the checkout is checked, so a target that writes into it is caught there.
-      - name: the recording
-        if: ${{ inputs.media != '' }}
-        env:
-          MEDIA_TARGET: ${{ inputs.media }}
-          REHEARSAL: ${{ inputs.rehearsal }}
-        run: |
-          set -u
-          # What the site shows on the game's page: NAME.gif, playing over and over, and NAME.png,
-          # its still. Made outside the checkout, then held to what the site takes.
-          record() { # $1 = the folder to make it in
-            local dir="$1" got size
-            mkdir -p "$dir"
-            make "$MEDIA_TARGET" MEDIA="$dir"
-            got=$(cd "$dir" && ls -A | LC_ALL=C sort | tr '\n' ' ')
-            if [ "$got" != "$NAME.gif $NAME.png " ]; then
-              echo "make $MEDIA_TARGET must write $NAME.gif and $NAME.png and nothing else, and wrote: $got" >&2
-              return 1
-            fi
-            for f in "$dir/$NAME.gif" "$dir/$NAME.png"; do
-              if [ ! -f "$f" ] || [ -L "$f" ] || [ ! -s "$f" ]; then echo "$(basename "$f") is not a file with something in it" >&2; return 1; fi
-            done
-            if [ "$(head -c 6 "$dir/$NAME.gif")" != GIF89a ]; then echo "$NAME.gif is not a GIF" >&2; return 1; fi
-            if [ "$(head -c 8 "$dir/$NAME.png" | od -An -tx1 | tr -d ' \n')" != 89504e470d0a1a0a ]; then echo "$NAME.png is not a PNG" >&2; return 1; fi
-            # The site's front page loads one for each game.
-            size=$(wc -c < "$dir/$NAME.gif" | tr -d ' ')
-            if [ "$size" -gt 3000000 ]; then echo "$NAME.gif is $size bytes: over the 3,000,000 the site allows" >&2; return 1; fi
-            echo "the recording: $NAME.gif, $size bytes, and $NAME.png"
-          }
-          record "$RUNNER_TEMP/media"
-          if [ "$REHEARSAL" = true ]; then
-            record "$RUNNER_TEMP/media-twice"
-            diff -r "$RUNNER_TEMP/media" "$RUNNER_TEMP/media-twice" > /dev/null || { echo "made twice, the recording differs" >&2; exit 1; }
-            echo "made twice, the recording is the same"
-          fi
-      - name: the tool that turns a manual page into HTML
-        if: ${{ inputs.man != '' }}
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends mandoc
-      - name: the checkout is still as the tag left it
-        run: |
-          left="$(git status --porcelain)"
-          if [ -n "$left" ]; then
-            echo "make check, or the recording, left these behind, and Go would stamp the release as built from changed sources:" >&2
-            echo "$left" >&2
-            exit 1
-          fi
-      - name: build
-        env:
-          PKG: ${{ inputs.package }}
-          PAGE: ${{ inputs.page }}
-          MAN: ${{ inputs.man }}
-          MEDIA_TARGET: ${{ inputs.media }}
-          REHEARSAL: ${{ inputs.rehearsal }}
-        run: |
-          set -u
-          # The same files give the same archive, byte for byte: fixed order, dates and owner.
-          pack() {
-            tar --sort=name --mtime='1980-01-01 00:00:00Z' --owner=0 --group=0 --numeric-owner -C "$1" -cf - . | gzip -n -9 > "$2"
-          }
-          build_into() {
-            local out="$1" target os arch stage size f sum rest
-            mkdir -p "$out"
-            for target in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64; do
-              os=${target%/*}; arch=${target#*/}; stage="$(mktemp -d)"
-              GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$stage/$NAME" "$PKG"
-              cp LICENSE "$stage/"
-              if [ -f NOTICES ]; then cp NOTICES "$stage/"; fi
-              # The manual page as it was written, for the launcher's `man` to open after an install.
-              if [ -n "$MAN" ]; then cp "$MAN" "$stage/"; fi
-              # mktemp makes a folder only its owner may enter, and tar would write that down.
-              chmod 755 "$stage"
-              pack "$stage" "$out/${NAME}_${os}_${arch}.tar.gz"
-            done
-            if [ "$PAGE" = true ]; then
-              stage="$(mktemp -d)"
-              GOOS=js GOARCH=wasm go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$stage/$NAME.wasm" "$PKG"
-              gzip -n -9 -c "$stage/$NAME.wasm" > "$out/$NAME.wasm.gz"
-              # The glue must come from the Go that built the program, or the page cannot start it.
-              cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" "$out/"
-              size=$(wc -c < "$out/$NAME.wasm.gz" | tr -d ' ')
-              if [ "$size" -gt 20000000 ]; then
-                echo "the build for the page is $size bytes gzipped: over 20 MB" >&2
-                return 1
-              fi
-            fi
-            if [ -n "$MAN" ]; then mandoc -T html "$MAN" > "$out/$(basename "$MAN").html"; fi
-            if [ -n "$MEDIA_TARGET" ]; then cp "$RUNNER_TEMP/media/$NAME.gif" "$RUNNER_TEMP/media/$NAME.png" "$out/"; fi
-            # The manifest: every file in name order, with its size and hash. An archive also
-            # says what it runs on. It holds no date, so the same build writes the same manifest.
-            # It is written beside the folder and moved in, or it would list itself, half made.
-            ( cd "$out"
-              for f in $(ls | LC_ALL=C sort); do
-                size=$(wc -c < "$f" | tr -d ' '); sum=$(sha256sum "$f" | cut -d' ' -f1)
-                os=""; arch=""
-                case "$f" in "${NAME}"_*_*.tar.gz) rest=${f#"${NAME}"_}; rest=${rest%.tar.gz}; os=${rest%_*}; arch=${rest#*_} ;; esac
-                jq -n --arg name "$f" --argjson size "$size" --arg sha256 "$sum" --arg os "$os" --arg arch "$arch" \
-                  '{name: $name, size: $size, sha256: $sha256} + (if $os != "" then {os: $os, arch: $arch} else {} end)'
-              done | jq -s --arg name "$NAME" --arg version "$VERSION" '{schema: 1, name: $name, version: $version, files: .}' ) > "$out.manifest"
-            mv "$out.manifest" "$out/manifest.json"
-          }
-          # Nothing is written inside the checkout. A file left there makes Go stamp every later
-          # build as made from changed sources, so the first archive would differ from the rest.
-          build_into "$RUNNER_TEMP/release"
-          cat "$RUNNER_TEMP/release/manifest.json"
-          if jq -e 'any(.files[]; .name == "manifest.json" or .size == 0)' "$RUNNER_TEMP/release/manifest.json" > /dev/null; then
-            echo "the manifest lists itself, or an empty file" >&2
-            exit 1
-          fi
-          if [ "$REHEARSAL" = true ]; then
-            build_into "$RUNNER_TEMP/twice"
-            cmp "$RUNNER_TEMP/release/manifest.json" "$RUNNER_TEMP/twice/manifest.json" || { echo "built twice, the release differs" >&2; exit 1; }
-            echo "built twice, the release is the same"
-          fi
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: release
-          path: ${{ runner.temp }}/release/
-          if-no-files-found: error
-
   # To sign a release again: take it as it was published. Its old signature must have been good
   # on the day it was published, and its manifest must name this program and this tag. Whether
   # its files still match the manifest is checked by try, before any new signature is published.
@@ -239,8 +74,8 @@ jobs:
   # The one job that holds the release key. The release environment lets only a tag v* in, and
   # waits for a person to approve.
   sign:
-    if: ${{ !cancelled() && !inputs.rehearsal && (needs.build.result == 'success' || needs.fetch.result == 'success') }}
-    needs: [build, fetch]
+    if: ${{ !cancelled() && !inputs.rehearsal && (!inputs.again || needs.fetch.result == 'success') }}
+    needs: fetch
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: release
@@ -275,8 +110,7 @@ jobs:
   # A rehearsal signs with a root, a release key and a certificate made here, good for an hour and
   # for nothing else. It then signs again under a second certificate, as a renewal does.
   sign-rehearsal:
-    if: ${{ inputs.rehearsal }}
-    needs: build
+    if: ${{ inputs.rehearsal && !inputs.again }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

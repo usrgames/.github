@@ -1,6 +1,6 @@
 # Releases
 
-Every usr.games program is released the same way, by one workflow: `.github/workflows/release.yml` in this repository. A repository calls it when a tag `v*` is pushed. This page says what it does, what a repository adds to use it, what a release holds, and how to rehearse.
+Every usr.games program is released the same way, by one workflow in two halves in this repository: `.github/workflows/build.yml` builds the release, and `.github/workflows/publish.yml` signs and publishes it. A repository calls both when a tag `v*` is pushed. This page says what it does, what a repository adds to use it, what a release holds, and how to rehearse.
 
 ## What happens on a tag
 
@@ -10,6 +10,8 @@ Every usr.games program is released the same way, by one workflow: `.github/work
 | sign | Waits in the repository's `release` environment for a person to approve. Then signs the manifest with the release key, naming its certificate, and checks its own signature. |
 | try | On Linux amd64, Linux arm64 and macOS, does what a player's machine does: checks the signature, checks every file against the manifest, unpacks the archive, and runs the program with `--version`. |
 | publish | Only once every try has passed. A tag with a hyphen, such as `v1.0.0-rc.1`, is published as a pre-release. |
+
+build is the first half, `build.yml`. sign, try and publish are the second, `publish.yml`.
 
 The keys, and how to check a release by hand, are in [KEYS.md](https://github.com/usrgames/usr.games/blob/main/KEYS.md) of the site's repository.
 
@@ -47,7 +49,7 @@ To trust a release: check the signature of `manifest.json` first, then check eve
 
 ## What a repository adds
 
-One file, `.github/workflows/release.yml`:
+One file, `.github/workflows/release.yml`, which calls both halves. tty1's, for example:
 
 ```yaml
 name: release
@@ -70,22 +72,32 @@ permissions:
   contents: read
 
 jobs:
-  release:
-    uses: usrgames/.github/.github/workflows/release.yml@COMMIT
+  build:
+    # Signing a release again builds nothing.
+    if: ${{ !inputs.again }}
+    uses: usrgames/.github/.github/workflows/build.yml@COMMIT
+    with:
+      name: tty1
+      man: man/tty1.1
+      rehearsal: ${{ inputs.rehearsal || false }}
+
+  publish:
+    needs: build
+    if: ${{ !cancelled() && (needs.build.result == 'success' || inputs.again) }}
+    uses: usrgames/.github/.github/workflows/publish.yml@COMMIT
+    # The half's last job publishes the release. Every other job there only reads.
     permissions:
       contents: write
     with:
-      name: rustwake
-      page: true
-      man: man/rustwake.6
-      media: media
+      name: tty1
+      man: man/tty1.1
       rehearsal: ${{ inputs.rehearsal || false }}
       again: ${{ inputs.again || false }}
     secrets:
       RELEASE_KEY: ${{ secrets.RELEASE_KEY }}
 ```
 
-`COMMIT` is the full commit of this repository to use. The organization accepts nothing less than a full commit.
+`COMMIT` is the full commit of this repository to use, the same in both. The organization accepts nothing less than a full commit. Each half must be called by the repository's own workflow: a call from one shared workflow to another would be looked up in the calling repository.
 
 And the repository needs:
 
@@ -97,23 +109,23 @@ And the repository needs:
 
 The inputs:
 
-| Input | What | Default |
-|---|---|---|
-| `name` | The program's name: its file in each archive, and the start of each archive's name. | required |
-| `package` | The Go package that is the program. | `.` |
-| `dir` | The folder of the Go module, when it is not the repository's root. | `.` |
-| `go-version` | The Go to build with. | `1.27` |
-| `page` | Also build for a web page. | `false` |
-| `man` | A manual page: it goes in each archive, and is shipped as HTML too. | none |
-| `media` | A make target that writes the recording, `NAME.gif` and `NAME.png`, into the folder `MEDIA` names. | none |
-| `rehearsal` | Sign with keys made for the run, and publish nothing. | `false` |
-| `again` | Build nothing: sign this tag's release again. | `false` |
+| Input | Half | What | Default |
+|---|---|---|---|
+| `name` | both | The program's name: its file in each archive, and the start of each archive's name. | required |
+| `package` | build | The Go package that is the program. | `.` |
+| `dir` | build | The folder of the Go module, when it is not the repository's root. | `.` |
+| `go-version` | build | The Go to build with. | `1.27` |
+| `page` | build | Also build for a web page. | `false` |
+| `man` | both | A manual page: build puts it in each archive and ships it as HTML too, and publish checks each archive holds it. | none |
+| `media` | build | A make target that writes the recording, `NAME.gif` and `NAME.png`, into the folder `MEDIA` names. | none |
+| `rehearsal` | both | Sign with keys made for the run, and publish nothing. | `false` |
+| `again` | publish | Sign this tag's published release again. The caller skips build. | `false` |
 
 ## Rehearse
 
 A rehearsal runs everything but the real key and the publishing. It makes a root, a release key and a certificate inside the run, good for an hour, signs with those, and tries the result on all three systems. It also builds the release twice and fails if the two differ.
 
-- In this repository, every pull request rehearses on the small program in `testdata/hello`.
+- In this repository, every pull request rehearses both halves on the small program in `testdata/hello`.
 - In a repository that calls the workflow: run its release workflow by hand, on any branch, with `rehearsal` ticked.
 
 ## Sign a release again
