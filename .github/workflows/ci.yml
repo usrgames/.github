@@ -39,11 +39,33 @@ jobs:
       man: man/hello.6
       rehearsal: true
 
+  # The rule that reruns a run GitHub found no runner for, rehearsed on runs saved from the API:
+  # four it must rerun, and five it must leave alone. testdata/retry/README.md says where each
+  # comes from.
+  retry:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { case: no-runner-glonk-ci, expect: rerun }
+          - { case: no-runner-tty1-release, expect: rerun }
+          - { case: no-runner-site-ci, expect: rerun }
+          - { case: no-runner-github-ci, expect: rerun }
+          - { case: failure-github-ci, expect: leave }
+          - { case: superseded-glonk-ci, expect: leave }
+          - { case: newer-run, expect: leave }
+          - { case: third-attempt, expect: leave }
+          - { case: other-cancel, expect: leave }
+    uses: ./.github/workflows/retry.yml
+    with:
+      rehearsal: testdata/retry/${{ matrix.case }}
+      expect: ${{ matrix.expect }}
+
   # The one name the rule on main asks for. A job that is skipped counts as passed there, so this
   # one always runs and says so itself if the rehearsal did not pass.
   check:
     if: ${{ always() }}
-    needs: [build, publish]
+    needs: [build, publish, retry]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -51,6 +73,7 @@ jobs:
         env:
           BUILD: ${{ needs.build.result }}
           PUBLISH: ${{ needs.publish.result }}
+          RETRY: ${{ needs.retry.result }}
         run: |
-          echo "the rehearsal: build $BUILD, publish $PUBLISH"
-          [ "$BUILD" = success ] && [ "$PUBLISH" = success ]
+          echo "the rehearsal: build $BUILD, publish $PUBLISH, retry $RETRY"
+          [ "$BUILD" = success ] && [ "$PUBLISH" = success ] && [ "$RETRY" = success ]
