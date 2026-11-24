@@ -1,0 +1,75 @@
+name: retry
+
+# Reruns a run's failed jobs when GitHub found no runner for one of them: a job, macOS's most
+# often, that waits 15 minutes in the queue and is cancelled with no steps (#14). A repository
+# calls it from a workflow of its own on workflow_run, which grants it actions write, to rerun,
+# and checks read, to read why a job was cancelled. RELEASES.md says how.
+on:
+  workflow_call:
+    inputs:
+      rehearsal:
+        description: "In this repository's CI only: a folder of testdata/retry to read the run from, in place of the API. Nothing is rerun."
+        type: string
+        default: ""
+      expect:
+        description: "With rehearsal: what the rule must decide, rerun or leave."
+        type: string
+        default: ""
+
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - if: ${{ inputs.rehearsal != '' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: rerun it if GitHub found no runner for a job
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REHEARSAL: ${{ inputs.rehearsal }}
+          EXPECT: ${{ inputs.expect }}
+          ID: ${{ github.event.workflow_run.id }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          WORKFLOW: ${{ github.event.workflow_run.workflow_id }}
+        run: |
+          # A rehearsal reads from its folder what the API would answer: $1 names the file.
+          api() { if [ -n "$REHEARSAL" ]; then cat "$REHEARSAL/$1"; else gh api -X GET "${@:2}"; fi; }
+          if [ -n "$REHEARSAL" ]; then
+            run=$REHEARSAL/run.json
+            ID=$(jq -r .id "$run") CONCLUSION=$(jq -r .conclusion "$run") ATTEMPT=$(jq -r .run_attempt "$run")
+            BRANCH=$(jq -r .head_branch "$run") WORKFLOW=$(jq -r .workflow_id "$run")
+          fi
+
+          # Sets said to rerun or leave, and why.
+          decide() {
+            if [ "$CONCLUSION" != failure ]; then said="leave: it ended $CONCLUSION"; return; fi
+            if [ "$ATTEMPT" -ge 3 ]; then said="leave: it has been rerun twice"; return; fi
+            # Every CI here cancels an older run on its branch, so a rerun of one that a newer run
+            # has passed would cancel the newer.
+            newest=$(api newest.json "repos/$GH_REPO/actions/workflows/$WORKFLOW/runs" -f branch="$BRANCH" -F per_page=1 | jq -r '.workflow_runs[0].id')
+            if [ "$newest" != "$ID" ]; then said="leave: run $newest is newer on $BRANCH"; return; fi
+            # A job GitHub found no runner for was cancelled before its first step, and says why.
+            idle=$(api jobs.json "repos/$GH_REPO/actions/runs/$ID/jobs" -f filter=latest -F per_page=100 | jq -r '.jobs[] | select(.conclusion == "cancelled" and (.steps | length) == 0) | .id')
+            for job in $idle; do
+              notes=$(api "annotations-$job.json" "repos/$GH_REPO/check-runs/$job/annotations")
+              if jq -e 'any(.[]; .message | contains("was not acquired by Runner"))' >/dev/null <<<"$notes"; then
+                said="rerun: GitHub found no runner for job $job"; return
+              fi
+            done
+            said="leave: no job of it went without a runner"
+          }
+          decide
+          echo "$said"
+          echo "Run $ID, attempt $ATTEMPT: $said" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -n "$REHEARSAL" ]; then
+            [ "${said%%:*}" = "$EXPECT" ] || { echo "a rehearsal of $REHEARSAL: wanted $EXPECT" >&2; exit 1; }
+          elif [ "${said%%:*}" = rerun ]; then
+            gh run rerun "$ID" --failed
+          fi
