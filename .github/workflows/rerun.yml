@@ -1,0 +1,18 @@
+name: rerun
+
+# When GitHub found no runner for a job of ci, rerun its failed jobs (#14): retry.yml decides,
+# and RELEASES.md says how another repository calls it. A workflow on workflow_run runs from
+# main, so this one calls retry.yml as main has it.
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+
+permissions:
+  actions: write
+  checks: read
+
+jobs:
+  retry:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    uses: ./.github/workflows/retry.yml
